@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            asset_name: pocketsentry-linux-amd64
+            cgo: "0"
+          - goos: linux
+            goarch: arm64
+            asset_name: pocketsentry-linux-arm64
+            cgo: "0"
+          - goos: darwin
+            goarch: amd64
+            asset_name: pocketsentry-darwin-amd64
+            cgo: "0"
+          - goos: darwin
+            goarch: arm64
+            asset_name: pocketsentry-darwin-arm64
+            cgo: "0"
+          - goos: windows
+            goarch: amd64
+            asset_name: pocketsentry-windows-amd64.exe
+            cgo: "0"
+          # === NUEVO: MIPSLE para GL-MT1300 (MT7621) ===
+          - goos: linux
+            goarch: mipsle
+            gomips: softfloat
+            asset_name: pocketsentry-linux-mipsle-softfloat
+            cgo: "1"
+            tags: "libsqlite3 linux"
+            cc: "mipsel-openwrt-linux-musl-gcc"
+            ldflags: "-linkmode=external -extldflags=-static"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      # === Setup OpenWrt SDK solo para MIPSLE ===
+      - name: Install OpenWrt SDK (MIPSLE)
+        if: matrix.cc != ''
+        run: |
+          wget -q https://downloads.openwrt.org/releases/23.05.0/targets/mediatek/mt7621/openwrt-sdk-23.05.0-mediatek-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz
+          tar -xf openwrt-sdk-*.tar.xz
+          echo "$(pwd)/openwrt-sdk-*/staging_dir/toolchain-mipsel_24kc_gcc-12.3.0_musl/bin" >> $GITHUB_PATH
+
+      - name: Patch SQLite driver (MIPSLE)
+        if: matrix.cc != ''
+        run: sed -i 's|_ "modernc.org/sqlite"|_ "github.com/mattn/go-sqlite3"|' main.go
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOMIPS: ${{ matrix.gomips }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+          CC: ${{ matrix.cc }}
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.cgo }}" = "1" ]; then
+            go mod tidy
+            go build -tags "${{ matrix.tags }}" -ldflags="${{ matrix.ldflags }}" -o dist/${{ matrix.asset_name }} .
+          else
+            go build -trimpath -ldflags="-s -w" -o dist/${{ matrix.asset_name }} .
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: release
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
